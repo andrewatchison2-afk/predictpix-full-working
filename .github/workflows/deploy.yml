@@ -7,6 +7,17 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    # Make your repo “Variables” available to every step
+    # (Settings → Secrets and variables → Actions → Variables)
+    env:
+      SSH_HOST:    ${{ vars.SSH_HOST }}        # e.g. 64.23.198.220
+      SSH_PORT:    ${{ vars.SSH_PORT }}        # e.g. 22
+      SSH_USER:    ${{ vars.SSH_USER }}        # e.g. deploy
+      SERVICE_NAME:${{ vars.SERVICE_NAME }}    # e.g. predictpix
+      RSYNC_SRC:   ${{ vars.RSYNC_SRC }}       # e.g. backend
+      RSYNC_DEST:  ${{ vars.RSYNC_DEST }}      # e.g. /opt/predictpix/app
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -14,34 +25,34 @@ jobs:
       - name: Add SSH key
         uses: webfactory/ssh-agent@v0.8.0
         with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}  # paste your OpenSSH private key into this secret
 
       - name: Trust host key
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          ssh-keyscan -p ${SSH_PORT:-22} -T 15 -H ${SSH_HOST} >> ~/.ssh/known_hosts
-        env:
-          SSH_HOST: ${{ vars.SSH_HOST }}
-          SSH_PORT: ${{ vars.SSH_PORT }}
+          ssh-keyscan -p "${SSH_PORT:-22}" -T 15 -H "${SSH_HOST}" >> ~/.ssh/known_hosts
 
       - name: Rsync app to server
+        shell: bash
         run: |
-          rsync -az --delete "${RSYNC_SRC:-app/}" "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST:-/opt/predictpix/app}"
-        env:
-          SSH_HOST: ${{ vars.SSH_HOST }}
-          SSH_USER: ${{ vars.SSH_USER }}
-          RSYNC_SRC: ${{ vars.RSYNC_SRC }}
-          RSYNC_DEST: ${{ vars.RSYNC_DEST }}
+          set -euo pipefail
+          # Push the local source (folder in the repo) to the server destination
+          # Flags avoid touching owner/perms/timestamps (fixes rsync code 23)
+          rsync -az --delete \
+            --omit-dir-times --no-perms --no-owner --no-group \
+            -e "ssh -p ${SSH_PORT:-22}" \
+            "${RSYNC_SRC%/}/" \
+            "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST:-/opt/predictpix/app}"
 
       - name: Restart service
+        shell: bash
         run: |
-          ssh -p ${SSH_PORT:-22} ${SSH_USER}@${SSH_HOST} \
-            'sudo systemctl restart '"${SERVICE_NAME}"' && sudo systemctl is-active '"${SERVICE_NAME}"
-        env:
-          SSH_HOST: ${{ vars.SSH_HOST }}
-          SSH_USER: ${{ vars.SSH_USER }}
-          SSH_PORT: ${{ vars.SSH_PORT }}
-          SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+          set -euo pipefail
+          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
+            'sudo systemctl restart '"${SERVICE_NAME}"' && sudo systemctl is-active '"${SERVICE_NAME}"''
 
       - name: Health check
+        shell: bash
         run: curl -fsS https://predictpix.com/api/health
