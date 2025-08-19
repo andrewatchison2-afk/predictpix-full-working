@@ -1,0 +1,21 @@
+from fastapi import FastAPI
+import os, psycopg
+app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/db/ready")
+def db_ready():
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return {"db":"err","error":"DATABASE_URL missing"}
+    try:
+        with psycopg.connect(url, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                cur.fetchone()
+        return {"db":"ok"}
+    except Exception as e:
+        return {"db":"err","error":str(e)[:200]}

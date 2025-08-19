@@ -1,0 +1,224 @@
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import os, psycopg
+from typing import Optional
+from decimal import Decimal
+from datetime import datetime, date
+from pydantic import BaseModel, Field
+from uuid import UUID, uuid4
+
+app = FastAPI()
+
+# ---- CORS (driven by FRONTEND_ORIGIN) ----
+# FRONTEND_ORIGIN can be a single origin, a comma-separated list, or "*" to allow all.
+# Example: FRONTEND_ORIGIN=https://predictpix.com,https://app.predictpix.com
+origins_env = os.getenv("FRONTEND_ORIGIN", "*").strip()
+if origins_env == "*" or origins_env == "":
+    allowed_origins = ["*"]
+else:
+    allowed_origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---- Helpers ----
+def _jsonify_rows(cur):
+    """Return list[dict] from the current cursor with safe JSON types."""
+    cols = [d[0] for d in cur.description]
+    items = []
+    for row in cur.fetchall():
+        obj = {}
+        for k, v in zip(cols, row):
+            if isinstance(v, Decimal):
+                obj[k] = float(v)
+            elif isinstance(v, (datetime, date)):
+                obj[k] = v.isoformat()
+            else:
+                obj[k] = v
+        items.append(obj)
+    return items
+
+def _db_url_or_500():
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL missing")
+    return url
+
+# ---- Existing endpoints (kept) ----
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/db/ready")
+def db_ready():
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return {"db": "err", "error": "DATABASE_URL missing"}
+    try:
+        with psycopg.connect(url, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1")
+                cur.fetchone()
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "err", "error": str(e)[:200]}
+
+# ---- API-prefixed aliases (no behavior change) ----
+@app.get("/api/health")
+def api_health():
+    return health()
+
+@app.get("/api/db/ready")
+def api_db_ready():
+    return db_ready()
+
+# ---- Markets list (read-only) ----
+@app.get("/api/markets")
+def list_markets(
+    category: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    tier: Optional[str] = Query(None),
+    archived: Optional[bool] = Query(None, description="If provided, filter by is_archived"),
+    search: Optional[str] = Query(None, description="ILIKE on question"),
+    sort: str = Query("created_at", description="One of: created_at,end_date,liquidity,tier,status"),
+    direction: str = Query("desc", description="asc or desc"),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Read-only listing from public.markets. Returns items + total count for paging."""
+    allowed_sorts = {
+        "created_at": "created_at",
+        "end_date": "end_date",
+        "liquidity": "liquidity",
+        "tier": "tier",
+        "status": "status",
+    }
+    sort_col = allowed_sorts.get(sort.lower(), "created_at")
+    dir_norm = "ASC" if str(direction).lower() == "asc" else "DESC"
+
+    where, args = [], []
+    if category:
+        where.append("category = %s"); args.append(category)
+    if status:
+        where.append("status = %s"); args.append(status)
+    if tier:
+        where.append("tier = %s"); args.append(tier)
+    if archived is not None:
+        where.append("is_archived = %s"); args.append(archived)
+    if search:
+        where.append("question ILIKE %s"); args.append(f"%{search}%")
+
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    select_sql = (
+        "SELECT id, question, category, tier, status, "
+        "created_at, end_date, liquidity, resolved, resolved_at, outcome "
+        "FROM public.markets"
+    )
+    order_sql = f" ORDER BY {sort_col} {dir_norm} "
+    limit_sql = " LIMIT %s OFFSET %s "
+
+    url = _db_url_or_500()
+    with psycopg.connect(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM public.markets{where_sql}", args)
+            total = cur.fetchone()[0]
+
+            cur.execute(select_sql + where_sql + order_sql + limit_sql, args + [limit, offset])
+            items = _jsonify_rows(cur)
+
+    return {"items": items, "page": {"limit": limit, "offset": offset, "total": total}}
+
+# ---- Create a prediction (insert into public.positions) ----
+class PredictionIn(BaseModel):
+    user_id: UUID
+    side: str
+    amount: float = Field(gt=0, description="Positive amount")
+
+@app.post("/api/markets/{market_id}/predict")
+def create_prediction(market_id: UUID, body: PredictionIn):
+    """
+    Inserts a row into public.positions. Minimal validation:
+    - market exists
+    - amount > 0
+    - no assumptions about 'side' values (free text)
+    Returns the new id and created_at.
+    """
+    url = _db_url_or_500()
+    new_id = uuid4()
+    with psycopg.connect(url) as conn:
+        with conn.cursor() as cur:
+            # Ensure market exists
+            cur.execute("SELECT 1 FROM public.markets WHERE id = %s", (str(market_id),))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="market not found")
+
+            # Insert position
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO public.positions (id, user_id, market_id, side, amount, created_at)
+                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    RETURNING created_at
+                    """,
+                    (str(new_id), str(body.user_id), str(market_id), body.side, body.amount),
+                )
+                created_at = cur.fetchone()[0]
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                # Return a concise error without leaking internals
+                raise HTTPException(status_code=400, detail=f"insert failed: {str(e)[:180]}")
+
+    return {"id": str(new_id), "market_id": str(market_id), "created_at": created_at.isoformat()}
+
+# ---- New: Positions list (read-only) ----
+@app.get("/api/positions")
+def list_positions(
+    user_id: Optional[UUID] = Query(None, description="Filter by user_id"),
+    market_id: Optional[UUID] = Query(None, description="Filter by market_id"),
+    sort: str = Query("created_at", description="One of: created_at,amount"),
+    direction: str = Query("desc", description="asc or desc"),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Read-only listing from public.positions. At least one of user_id or market_id is required.
+    Returns items + total count for paging.
+    """
+    if user_id is None and market_id is None:
+        raise HTTPException(status_code=400, detail="Provide user_id or market_id")
+
+    allowed_sorts = {"created_at": "created_at", "amount": "amount"}
+    sort_col = allowed_sorts.get(sort.lower(), "created_at")
+    dir_norm = "ASC" if str(direction).lower() == "asc" else "DESC"
+
+    where, args = [], []
+    if user_id is not None:
+        where.append("user_id = %s"); args.append(str(user_id))
+    if market_id is not None:
+        where.append("market_id = %s"); args.append(str(market_id))
+
+    where_sql = " WHERE " + " AND ".join(where)
+
+    select_sql = (
+        "SELECT id, user_id, market_id, side, amount, created_at "
+        "FROM public.positions"
+    )
+    order_sql = f" ORDER BY {sort_col} {dir_norm} "
+    limit_sql = " LIMIT %s OFFSET %s "
+
+    url = _db_url_or_500()
+    with psycopg.connect(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM public.positions{where_sql}", args)
+            total = cur.fetchone()[0]
+
+            cur.execute(select_sql + where_sql + order_sql + limit_sql, args + [limit, offset])
+            items = _jsonify_rows(cur)
+
+    return {"items": items, "page": {"limit": limit, "offset": offset, "total": total}}
