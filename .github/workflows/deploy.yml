@@ -9,14 +9,13 @@ on:
   workflow_dispatch:
 
 env:
-  # Repo ➜ Settings ➜ Secrets and variables ➜ Actions ➜ Variables
-  SSH_HOST: ${{ vars.SSH_HOST }}      # e.g. 64.23.198.220
-  SSH_PORT: ${{ vars.SSH_PORT }}      # e.g. 22
-  SSH_USER: ${{ vars.SSH_USER }}      # e.g. deploy
-  SERVICE_NAME: ${{ vars.SERVICE_NAME }}  # e.g. predictpix
-  RSYNC_SRC: ${{ vars.RSYNC_SRC }}    # e.g. backend/
-  RSYNC_DEST: ${{ vars.RSYNC_DEST }}  # e.g. /opt/predictpix/app
-  HEALTH_URL: ${{ vars.HEALTH_URL }}  # e.g. https://predictpix.com/api/health
+  SSH_HOST: ${{ vars.SSH_HOST }}
+  SSH_PORT: ${{ vars.SSH_PORT }}
+  SSH_USER: ${{ vars.SSH_USER }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  RSYNC_SRC: ${{ vars.RSYNC_SRC }}
+  RSYNC_DEST: ${{ vars.RSYNC_DEST }}
+  HEALTH_URL: ${{ vars.HEALTH_URL }} # e.g. https://predictpix.com/api/health
 
 jobs:
   deploy:
@@ -50,7 +49,6 @@ jobs:
         run: |
           date -u +%FT%TZ | ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "cat > '${RSYNC_DEST%/}/.deployed-at'"
 
-      # >>> ADDED STEP <<<
       - name: Write commit SHA marker
         run: |
           echo "${GITHUB_SHA}" | ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "cat > '${RSYNC_DEST%/}/.deployed-sha'"
@@ -60,8 +58,22 @@ jobs:
           ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
             "sudo /usr/bin/systemctl restart '${SERVICE_NAME}' && sudo /usr/bin/systemctl is-active '${SERVICE_NAME}'"
 
-      - name: Health check (public)
+      - name: Health check (public, retry with pipefail)
+        shell: bash
         run: |
-          curl -fsS "${HEALTH_URL:-https://predictpix.com/api/health}" | head -c 200
+          set -Eeuo pipefail
+          url="${HEALTH_URL:-https://predictpix.com/api/health}"
+          echo "Polling $url until HTTP 200…"
+          for i in {1..24}; do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' "$url" || true)
+            if [ "$code" = "200" ]; then
+              curl -fsS "$url" | head -c 200
+              exit 0
+            fi
+            echo "Health not ready (HTTP $code). Retry $i/24…"
+            sleep 5
+          done
+          echo "Health check failed after retries."
+          exit 1
 
 
