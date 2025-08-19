@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
 
 env:
-  # Repo → Settings → Secrets and variables → Actions → Variables
-  SSH_HOST: ${{ vars.SSH_HOST }}          # e.g. 64.23.198.220
-  SSH_PORT: ${{ vars.SSH_PORT }}          # e.g. 22
-  SSH_USER: ${{ vars.SSH_USER }}          # e.g. deploy
+  # Repo ➜ Settings ➜ Secrets and variables ➜ Actions ➜ Variables
+  SSH_HOST: ${{ vars.SSH_HOST }}      # e.g. 64.23.198.220
+  SSH_PORT: ${{ vars.SSH_PORT }}      # e.g. 22
+  SSH_USER: ${{ vars.SSH_USER }}      # e.g. deploy
   SERVICE_NAME: ${{ vars.SERVICE_NAME }}  # e.g. predictpix
-  RSYNC_SRC: ${{ vars.RSYNC_SRC }}        # e.g. backend
-  RSYNC_DEST: ${{ vars.RSYNC_DEST }}      # e.g. /opt/predictpix/app
-  HEALTH_URL: ${{ vars.HEALTH_URL }}      # e.g. https://predictpix.com/api/health
+  RSYNC_SRC: ${{ vars.RSYNC_SRC }}    # e.g. backend/
+  RSYNC_DEST: ${{ vars.RSYNC_DEST }}  # e.g. /opt/predictpix/app
+  HEALTH_URL: ${{ vars.HEALTH_URL }}  # e.g. https://predictpix.com/api/health
 
 jobs:
   deploy:
@@ -33,30 +33,35 @@ jobs:
       - name: Trust server host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -T 15 -H -p "${SSH_PORT:-22}" "${SSH_HOST}" >> ~/.ssh/known_hosts
+          ssh-keyscan -T 10 -p "${SSH_PORT:-22}" "${SSH_HOST}" >> ~/.ssh/known_hosts
 
       - name: Ensure destination directory exists
         run: |
-          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "mkdir -p '${RSYNC_DEST}'"
+          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "mkdir -p '${RSYNC_DEST%/}'"
 
       - name: Rsync backend to server
         run: |
-          rsync -az --delete \
-            --no-perms --no-owner --no-group --no-times \
-            --exclude='.git/' --exclude='.github/' --exclude='__pycache__/' \
-            "${RSYNC_SRC}/" "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST}/"
+          rsync -az --delete --omit-dir-times --no-perms --no-owner --no-group \
+            --exclude=".git/" --exclude=".github/" --exclude="__pycache__/" \
+            -e "ssh -p ${SSH_PORT:-22}" \
+            "${RSYNC_SRC%/}/" "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST%/}/"
 
       - name: Mark deploy time
         run: |
-          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
-            "date -u +%FT%TZ > '${RSYNC_DEST}/.deployed-at'"
+          date -u +%FT%TZ | ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "cat > '${RSYNC_DEST%/}/.deployed-at'"
+
+      # >>> ADDED STEP <<<
+      - name: Write commit SHA marker
+        run: |
+          echo "${GITHUB_SHA}" | ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "cat > '${RSYNC_DEST%/}/.deployed-sha'"
 
       - name: Restart service
         run: |
           ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
-            "sudo -n /usr/bin/systemctl restart '${SERVICE_NAME}' && sudo -n /usr/bin/systemctl is-active '${SERVICE_NAME}'"
+            "sudo /usr/bin/systemctl restart '${SERVICE_NAME}' && sudo /usr/bin/systemctl is-active '${SERVICE_NAME}'"
 
       - name: Health check (public)
         run: |
           curl -fsS "${HEALTH_URL:-https://predictpix.com/api/health}" | head -c 200
+
 
