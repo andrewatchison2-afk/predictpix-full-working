@@ -1,91 +1,62 @@
-import React from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
 
-const PURPLE = '#B033F2';
-const CARD_BG = '#1c1c1e';
+// app/(tabs)/profile.tsx
+import React, { useEffect, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Alert } from "react-native";
+import { useRouter } from "expo-router";
+import { apiGet } from "../../lib/api/client";
+import { setAuthToken } from "../../lib/auth/store";
+
+type UserInfo = { email?: string; username?: string; role?: string; is_admin?: boolean; isAdmin?: boolean; };
 
 export default function ProfileScreen() {
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [err, setErr] = useState("");
   const router = useRouter();
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = await apiGet<UserInfo>("/api/auth/validate");
+        if (!cancelled) setUser(info);
+      } catch (e: any) {
+        if (!cancelled) setErr(String(e?.message || "Failed to load profile"));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const onLogout = () => {
+    setAuthToken(null);
+    Alert.alert("Logged out", "Token cleared.");
+    router.replace("/(tabs)/home");
+  };
+
   return (
-    <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.heading}>Your Profile</Text>
-        <TouchableOpacity onPress={() => router.push('/settings')}>
-          <Ionicons name="settings-outline" size={24} color={PURPLE} />
-        </TouchableOpacity>
+    <View style={styles.root}>
+      <View style={styles.card}>
+        <Text style={styles.h1}>Profile</Text>
+        {err ? <Text style={styles.err}>{err}</Text> : null}
+        <Text style={styles.kv}><Text style={styles.k}>Email:</Text> <Text style={styles.v}>{user?.email || "—"}</Text></Text>
+        <Text style={styles.kv}><Text style={styles.k}>Username:</Text> <Text style={styles.v}>{user?.username || "—"}</Text></Text>
+        <Text style={styles.kv}><Text style={styles.k}>Role:</Text> <Text style={styles.v}>{user?.role || ((user?.is_admin || user?.isAdmin) ? "admin" : "user")}</Text></Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContainer}>
-        <View style={styles.section}>
-          <Text style={styles.label}>Username</Text>
-          <Text style={styles.value}>pi_user_123</Text>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.label}>Total Markets Created</Text>
-          <Text style={styles.value}>6</Text>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.label}>Referral Code</Text>
-          <Text style={styles.value}>PIX-REF-9876</Text>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.label}>Account Type</Text>
-          <Text style={styles.value}>Pioneer</Text>
-        </View>
-      </ScrollView>
+      <TouchableOpacity style={styles.btn} onPress={onLogout}>
+        <Text style={styles.btnT}>Log out</Text>
+      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-    paddingTop: 60,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 16,
-  },
-  heading: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 'bold',
-  },
-  scrollContainer: {
-    paddingHorizontal: 16,
-    paddingBottom: 40,
-  },
-  section: {
-    marginBottom: 16,
-    backgroundColor: CARD_BG,
-    borderRadius: 12,
-    padding: 16,
-  },
-  label: {
-    color: '#aaa',
-    fontSize: 14,
-    marginBottom: 4,
-  },
-  value: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
+  root: { flex: 1, backgroundColor: "#000", padding: 16 },
+  h1: { color: "#fff", fontSize: 22, fontWeight: "bold", marginBottom: 10 },
+  card: { backgroundColor: "#1c1c1e", borderRadius: 12, padding: 14, marginBottom: 12 },
+  kv: { color: "#ddd", marginBottom: 6 },
+  k: { color: "#aaa" },
+  v: { color: "#fff" },
+  btn: { alignSelf: "flex-start", backgroundColor: "#FFD700", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 14 },
+  btnT: { color: "#000", fontWeight: "bold" },
+  err: { color: "tomato", marginBottom: 8 },
 });

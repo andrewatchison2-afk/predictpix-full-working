@@ -1,0 +1,98 @@
+// app/login.tsx
+import React, { useState } from "react";
+import { View, Text, TextInput, Pressable, Alert } from "react-native";
+import { useRouter } from "expo-router";
+import { loginWithEmail } from "../lib/api/auth";
+
+export default function LoginScreen() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function onSignIn() {
+    if (!email || !password) {
+      Alert.alert("Missing info", "Enter your email and password.");
+      return;
+    }
+    try {
+      setBusy(true);
+      await loginWithEmail(email.trim(), password);
+      router.replace("/(tabs)/home");
+    } catch (e: any) {
+      Alert.alert("Login failed", e?.message || "Unknown error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: "#0f0b1e", padding: 20, justifyContent: "center" }}>
+      <Text style={{ color: "#f0e6ff", fontSize: 28, fontWeight: "700", marginBottom: 6 }}>
+        PredictPiX
+      </Text>
+      <Text style={{ color: "#cbb7ff", fontSize: 16, marginBottom: 24 }}>
+        Sign in to continue (email/password). We’ll switch to Pi later.
+      </Text>
+
+      <View style={{ backgroundColor: "#1b1530", borderRadius: 12, padding: 12, marginBottom: 10 }}>
+        <Text style={{ color: "#cbb7ff", marginBottom: 6 }}>Email</Text>
+        <TextInput
+          value={email}
+          onChangeText={setEmail}
+          placeholder="you@example.com"
+          placeholderTextColor="#9b8bbf"
+          autoCapitalize="none"
+          keyboardType="email-address"
+          style={{
+            color: "white",
+            borderWidth: 1,
+            borderColor: "#3a2f64",
+            borderRadius: 10,
+            paddingHorizontal: 12,
+            paddingVertical: 10,
+          }}
+        />
+      </View>
+
+      <View style={{ backgroundColor: "#1b1530", borderRadius: 12, padding: 12, marginBottom: 16 }}>
+        <Text style={{ color: "#cbb7ff", marginBottom: 6 }}>Password</Text>
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="••••••••"
+          placeholderTextColor="#9b8bbf"
+          secureTextEntry
+          style={{
+            color: "white",
+            borderWidth: 1,
+            borderColor: "#3a2f64",
+            borderRadius: 10,
+            paddingHorizontal: 12,
+            paddingVertical: 10,
+          }}
+        />
+      </View>
+
+      <Pressable
+        onPress={onSignIn}
+        disabled={busy}
+        style={{
+          backgroundColor: busy ? "#4c3a7a" : "#5b21b6",
+          paddingVertical: 14,
+          borderRadius: 14,
+          alignItems: "center",
+          marginBottom: 12,
+        }}
+      >
+        <Text style={{ color: "white", fontSize: 16, fontWeight: "600" }}>
+          {busy ? "Signing in…" : "Sign in"}
+        </Text>
+      </Pressable>
+
+      <Text style={{ color: "#9b8bbf", fontSize: 12, marginTop: 8 }}>
+        Tip: This calls the server’s /api/auth/email/login and stores the JWT.
+      </Text>
+    </View>
+  );
+}

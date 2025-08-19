@@ -1,0 +1,32 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Node / Expo / React Native
+node_modules/
+.expo/
+.expo-shared/
+web-build/
+dist/
+build/
+.expo/
+android/
+ios/
+
+# Python/venv (if present)
+venv/
+.env.*
+*.pyc
+__pycache__/
+
+# Frontend caches
+.npm/
+.yarn/
+.yarn/cache/
+.pnp.cjs
+.pnp.loader.mjs
+
+# Don’t commit secrets
+.env
+*.env

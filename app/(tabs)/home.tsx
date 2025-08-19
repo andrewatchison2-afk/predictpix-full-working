@@ -1,295 +1,356 @@
-import React, { useState } from 'react';
+// app/(tabs)/home.tsx
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
-  ScrollView,
+  FlatList,
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Dimensions,
-  Platform,
-  StatusBar,
+  ActivityIndicator,
+  Alert,
   Modal,
-} from 'react-native';
+  RefreshControl,
+} from "react-native";
+import { useRouter } from "expo-router";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { getToken } from "../../lib/api/client";
+import { listMarkets, NormalizedMarket, createOrder } from "../../lib/api/markets";
 
-// ✅ Unified PredictPix purple
-const PURPLE = '#B033F2';
+const PURPLE = "#8a2be2";   // Predict + X
+const GOLD = "#ffd700";     // Pi
+const BG = "#000000";
+const CARD_BG = "#1c1c1e";
 
-const HomeScreen = () => {
-  const [search, setSearch] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('All');
-  const [showModal, setShowModal] = useState(false);
-  const [selectedMarket, setSelectedMarket] = useState(null);
-  const [selectedSide, setSelectedSide] = useState<'yes' | 'no' | null>(null);
-  const [amount, setAmount] = useState('');
+const CATEGORIES = ["All", "Pi", "Crypto", "Politics", "Tech", "Sports-safe", "Macro", "Pop Culture", "Science"];
 
-  const categories = ['All', 'Trending', 'Newest', 'Pi Coin', 'Politics', 'Crypto', 'Weather'];
+// --- Preview markets shown if backend is empty/down ---
+const MOCK_MARKETS: NormalizedMarket[] = [
+  { id: "m-ppx-500dau", title: "Will PredictPiX reach 500 daily users within 30 days?", category: "Pi", tags: ["Pi","Growth"], yesProb: 0.41, volume24h: 320, status: "active", raw: {} },
+  { id: "m-btc-80k", title: "Will Bitcoin close above $80,000 on Aug 31?", category: "Crypto", tags: ["Crypto","Bitcoin"], yesProb: 0.62, volume24h: 1240, status: "active", raw: {} },
+  { id: "m-eth-etf", title: "Will ETH ETF approvals expand by Q4 2025?", category: "Crypto", tags: ["Crypto","ETF"], yesProb: 0.58, volume24h: 860, status: "active", raw: {} },
+  { id: "m-foldable", title: "Will a foldable iPhone be announced this year?", category: "Tech", tags: ["Tech","Apple"], yesProb: 0.27, volume24h: 220, status: "active", raw: {} },
+  { id: "m-artemis2", title: "Will Artemis II launch before Dec 31, 2025?", category: "Science", tags: ["Science","Space"], yesProb: 0.46, volume24h: 540, status: "active", raw: {} },
+  { id: "m-cpi-sept", title: "Will US CPI YoY exceed 3.5% in September?", category: "Macro", tags: ["Macro","Inflation"], yesProb: 0.33, volume24h: 410, status: "active", raw: {} },
+];
 
-  const allMarkets = [
-    { id: '1', title: 'Will Pi Network hit $10 by 2025?', category: 'Pi Coin', yes: 62, no: 38 },
-    { id: '2', title: 'Will Bitcoin close above $30k on Friday?', category: 'Crypto', yes: 65, no: 35 },
-    { id: '3', title: 'Will Trump win the 2024 election?', category: 'Politics', yes: 40, no: 60 },
-    { id: '4', title: 'Will Ethereum gas fees drop below $5?', category: 'Crypto', yes: 70, no: 30 },
-    { id: '5', title: 'Will it rain in London tomorrow?', category: 'Weather', yes: 55, no: 45 },
-    { id: '6', title: 'Will gold hit $2,200 this month?', category: 'Trending', yes: 61, no: 39 },
-    { id: '7', title: 'Will the S&P 500 hit a new ATH this year?', category: 'Trending', yes: 66, no: 34 },
-    { id: '8', title: 'Will DOGE double in price by August?', category: 'Crypto', yes: 58, no: 42 },
-    { id: '9', title: 'Will Pi Coin be listed on Binance in 2025?', category: 'Pi Coin', yes: 77, no: 23 },
-    { id: '10', title: 'Will a major country ban crypto in 2025?', category: 'Politics', yes: 33, no: 67 },
-  ];
+type BuySheetState = {
+  open: boolean;
+  market?: NormalizedMarket;
+  side?: "yes" | "no";
+  qty?: string;
+  submitting?: boolean;
+};
 
-  const filteredMarkets = allMarkets.filter((market) => {
-    const matchesSearch = market.title.toLowerCase().includes(search.toLowerCase());
-    const matchesCategory =
-      selectedCategory === 'All' ||
-      market.category.toLowerCase() === selectedCategory.toLowerCase();
-    return matchesSearch && matchesCategory;
-  });
+function useAuthGate(router: ReturnType<typeof useRouter>) {
+  return (next: () => void) => {
+    const t = getToken();
+    if (!t) {
+      Alert.alert("Login required", "Please log in to continue.", [
+        { text: "Cancel", style: "cancel" },
+        { text: "Login", onPress: () => router.push("/login") },
+      ]);
+      return;
+    }
+    next();
+  };
+}
 
-  const handleBuy = (market, side) => {
-    setSelectedMarket(market);
-    setSelectedSide(side);
-    setAmount('');
-    setShowModal(true);
+// Utility: fetch with timeout so we never hang forever
+async function withTimeout<T>(p: Promise<T>, ms = 7000): Promise<T> {
+  return await Promise.race<T>([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error("request timeout")), ms)) as any,
+  ]);
+}
+
+export default function HomeScreen() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const authGate = useAuthGate(router);
+
+  // UI state
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState<string>("All");
+
+  // Data state
+  const [page, setPage] = useState(1);
+  const [items, setItems] = useState<NormalizedMarket[]>([]);
+  const [hasMore, setHasMore] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [softMsg, setSoftMsg] = useState("");
+
+  // Buy sheet
+  const [buy, setBuy] = useState<BuySheetState>({ open: false });
+
+  // avoid overlapping loads
+  const loadLock = useRef(false);
+
+  const catParam = useMemo(
+    () => (category === "All" ? undefined : category.toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_")),
+    [category]
+  );
+
+  const loadPage1 = useCallback(async () => {
+    if (loadLock.current) return;
+    loadLock.current = true;
+    setInitialLoading(true);
+    setSoftMsg("");
+
+    try {
+      const res = await withTimeout(listMarkets({ page: 1, category: catParam }), 7000);
+      if (!res.items || res.items.length === 0) {
+        // Empty feed → show preview to avoid a blank screen
+        setItems(MOCK_MARKETS);
+        setHasMore(false);
+        setSoftMsg("Showing preview markets — connect backend for live data.");
+      } else {
+        setItems(res.items);
+        setHasMore(res.hasMore);
+        setPage(1);
+      }
+    } catch (err: any) {
+      console.log("markets.load error", err?.message || err);
+      setItems(MOCK_MARKETS);
+      setHasMore(false);
+      setSoftMsg("Live feed unavailable — showing preview markets.");
+    } finally {
+      setInitialLoading(false);
+      loadLock.current = false;
+    }
+  }, [catParam]);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || initialLoading || !hasMore || loadLock.current) return;
+    loadLock.current = true;
+    setLoadingMore(true);
+    try {
+      const next = page + 1;
+      const res = await withTimeout(listMarkets({ page: next, category: catParam }), 7000);
+      setItems((prev) => [...prev, ...(res.items || [])]);
+      setHasMore(!!res.hasMore);
+      setPage(next);
+    } catch (err) {
+      console.log("markets.loadMore error", String((err as any)?.message || err));
+      setHasMore(false);
+    } finally {
+      setLoadingMore(false);
+      loadLock.current = false;
+    }
+  }, [loadingMore, initialLoading, hasMore, page, catParam]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadPage1();
+    setRefreshing(false);
+  }, [loadPage1]);
+
+  useEffect(() => {
+    loadPage1();
+  }, [loadPage1]);
+
+  const data = useMemo(() => {
+    const sentinel = [{ __type: "chips" } as any];
+    const filtered = search.trim()
+      ? items.filter((m) => m.title.toLowerCase().includes(search.trim().toLowerCase()))
+      : items;
+    return [...sentinel, ...filtered];
+  }, [items, search]);
+
+  const onBuyPress = (m: NormalizedMarket, side: "yes" | "no") =>
+    authGate(() => setBuy({ open: true, market: m, side, qty: "" }));
+
+  const submitBuy = async () => {
+    if (!buy.market || !buy.side) return;
+    const qtyNum = Number(buy.qty);
+    if (!(qtyNum > 0)) {
+      Alert.alert("Enter amount", "Please enter a quantity greater than zero.");
+      return;
+    }
+    try {
+      setBuy((s) => ({ ...s, submitting: true }));
+      // ✅ send real backend id when available
+      await createOrder({
+        market_id: (buy.market.raw?.id ?? buy.market.id) as any,
+        side: buy.side!,
+        quantity: qtyNum,
+      });
+      setBuy({ open: false });
+      Alert.alert("Success", "Your order was placed.");
+    } catch (e: any) {
+      Alert.alert("Order failed", String(e?.message || "Please try again."));
+    } finally {
+      setBuy((s) => ({ ...s, submitting: false }));
+    }
+  };
+
+  const renderItem = ({ item }: { item: any }) => {
+    if (item?.__type === "chips") {
+      return (
+        <View style={styles.chipsWrap}>
+          <FlatList
+            horizontal
+            data={CATEGORIES}
+            keyExtractor={(c) => c}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}
+            renderItem={({ item: c }) => {
+              const selected = c === category;
+              return (
+                <TouchableOpacity onPress={() => setCategory(c)} style={[styles.chip, selected && styles.chipSelected]}>
+                  <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{c}</Text>
+                </TouchableOpacity>
+              );
+            }}
+          />
+        </View>
+      );
+    }
+
+    const m = item as NormalizedMarket;
+    const yes = Math.round((m.yesProb ?? 0.5) * 100);
+    const no = 100 - yes;
+
+    return (
+      <TouchableOpacity
+        style={styles.card}
+        onPress={() => router.push({ pathname: "/market/[id]", params: { id: String(m.id) } })}
+        activeOpacity={0.85}
+      >
+        <Text numberOfLines={2} style={styles.title}>{m.title}</Text>
+        <View style={styles.sparkline} />
+        <View style={styles.percentRow}>
+          <Text style={styles.yesPct}>{yes}% Yes</Text>
+          <Text style={styles.noPct}>{no}% No</Text>
+        </View>
+        <View style={styles.btnRow}>
+          <TouchableOpacity style={styles.buyYes} onPress={() => onBuyPress(m, "yes")}>
+            <Text style={styles.btnTextDark}>Buy Yes</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.buyNo} onPress={() => onBuyPress(m, "no")}>
+            <Text style={styles.btnText}>Buy No</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.micro}>{m.tags?.join(" · ") || m.category || "—"} · Vol 24h {m.volume24h ?? "—"}</Text>
+      </TouchableOpacity>
+    );
   };
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
+    <View style={[styles.root, { paddingTop: Math.max(insets.top, 0) }]}>
+      {/* App bar */}
+      <View style={styles.appbar}>
         <Text style={styles.logo}>
           <Text style={{ color: PURPLE }}>Predict</Text>
-          <Text style={{ color: 'gold' }}>Pi</Text>
+          <Text style={{ color: GOLD }}>Pi</Text>
           <Text style={{ color: PURPLE }}>X</Text>
         </Text>
-        <TouchableOpacity style={styles.loginButton} onPress={() => alert('Mock login')}>
-          <Text style={styles.loginText}>Login with Pi</Text>
+        <TouchableOpacity onPress={() => router.push("/login")} style={styles.loginBtn} activeOpacity={0.8}>
+          <Text style={styles.loginText}>Login</Text>
         </TouchableOpacity>
       </View>
 
       {/* Search */}
       <TextInput
-        placeholder="Search markets..."
+        placeholder="Search markets…"
         placeholderTextColor="#aaa"
-        style={styles.searchBar}
+        style={styles.search}
         value={search}
         onChangeText={setSearch}
       />
 
-      {/* Categories */}
-      <View style={styles.categoryWrapper}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {categories.map((cat) => (
-            <TouchableOpacity
-              key={cat}
-              style={[
-                styles.categoryButton,
-                selectedCategory === cat && styles.selectedCategory,
-              ]}
-              onPress={() => setSelectedCategory(cat)}
-            >
-              <Text
-                style={[
-                  styles.categoryText,
-                  selectedCategory === cat && styles.selectedText,
-                ]}
-              >
-                {cat}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
+      {/* Feed */}
+      {initialLoading ? (
+        <ActivityIndicator size="large" color={PURPLE} style={{ marginTop: 40 }} />
+      ) : (
+        <FlatList
+          data={data}
+          keyExtractor={(item, i) => (item?.__type === "chips" ? "chips" : String((item as NormalizedMarket).id ?? i))}
+          renderItem={renderItem}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.5}
+          ListEmptyComponent={<Text style={styles.empty}>No markets.</Text>}
+          ListFooterComponent={
+            loadingMore ? <Text style={styles.footer}>Loading…</Text> : !!softMsg ? <Text style={[styles.footer, { color: "#ffb4b4" }]}>{softMsg}</Text> : null
+          }
+          stickyHeaderIndices={[0]}
+          contentContainerStyle={{ paddingBottom: 24 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={PURPLE} />}
+        />
+      )}
 
-      {/* Market Cards */}
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        {filteredMarkets.map((market) => (
-          <View key={market.id} style={styles.marketCard}>
-            <Text style={styles.marketTitle}>{market.title}</Text>
-            <View style={styles.buttonRow}>
-              <TouchableOpacity
-                style={styles.buyYes}
-                onPress={() => handleBuy(market, 'yes')}
-              >
-                <Text style={styles.buttonText}>Buy Yes ({market.yes}%)</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.buyNo}
-                onPress={() => handleBuy(market, 'no')}
-              >
-                <Text style={styles.buttonText}>Buy No ({market.no}%)</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ))}
-      </ScrollView>
+      {/* Buy modal */}
+      <Modal visible={buy.open} animationType="slide" transparent onRequestClose={() => setBuy({ open: false })}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>{buy.side === "yes" ? "Buy Yes" : "Buy No"}</Text>
+            <Text style={styles.modalSubtitle} numberOfLines={2}>{buy.market?.title ?? ""}</Text>
 
-      {/* Buy Modal */}
-      <Modal visible={showModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>Place Order</Text>
-            <Text style={styles.modalText}>
-              {selectedSide === 'yes' ? 'Buy Yes' : 'Buy No'} on:
-            </Text>
-            <Text style={styles.modalMarket}>{selectedMarket?.title}</Text>
             <TextInput
-              placeholder="Enter amount (Pi)"
-              placeholderTextColor="#999"
+              placeholder="Quantity (Pi)"
+              placeholderTextColor="#aaa"
               keyboardType="numeric"
-              value={amount}
-              onChangeText={setAmount}
-              style={styles.input}
+              value={buy.qty ?? ""}
+              onChangeText={(t) => setBuy((s) => ({ ...s, qty: t }))}
+              style={styles.modalInput}
             />
-            <TouchableOpacity style={styles.modalButton} onPress={() => setShowModal(false)}>
-              <Text style={{ color: '#000', fontWeight: 'bold' }}>Confirm</Text>
+
+            <View style={{ height: 12 }} />
+            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: GOLD }]} disabled={!!buy.submitting} onPress={submitBuy}>
+              {buy.submitting ? <ActivityIndicator /> : <Text style={[styles.btnTextDark, { fontWeight: "700" }]}>Confirm</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.modalBtn, { backgroundColor: CARD_BG, marginTop: 8 }]} onPress={() => setBuy({ open: false })}>
+              <Text style={styles.btnText}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
     </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight + 10 : 50,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 10,
-  },
-  logo: {
-    fontSize: 28,
-    fontWeight: 'bold',
-  },
-  loginButton: {
-    backgroundColor: PURPLE,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-  },
-  loginText: {
-    color: '#fff',
-    fontWeight: 'bold',
-  },
-  searchBar: {
-    backgroundColor: '#1c1c1e',
-    padding: 12,
-    marginHorizontal: 16,
-    borderRadius: 10,
-    color: '#fff',
-    marginBottom: 10,
-  },
-  categoryWrapper: {
-    paddingLeft: 10,
-    marginBottom: 8,
-  },
-  categoryButton: {
-    backgroundColor: '#1c1c1e',
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    marginRight: 10,
-  },
-  selectedCategory: {
-    backgroundColor: PURPLE,
-  },
-  categoryText: {
-    color: '#aaa',
-    fontSize: 14,
-  },
-  selectedText: {
-    color: '#fff',
-    fontWeight: 'bold',
-  },
-  scrollContent: {
-    paddingBottom: 160,
-  },
-  marketCard: {
-    backgroundColor: '#1c1c1e',
-    marginHorizontal: 16,
-    marginBottom: 14,
-    padding: 16,
-    borderRadius: 10,
-  },
-  marketTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 12,
-  },
-  buyYes: {
-    backgroundColor: '#FFD700',
-    padding: 12,
-    borderRadius: 10,
-    flex: 0.48,
-    alignItems: 'center',
-  },
-  buyNo: {
-    backgroundColor: PURPLE,
-    padding: 12,
-    borderRadius: 10,
-    flex: 0.48,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#000',
-    fontWeight: 'bold',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: '#000000aa',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalBox: {
-    backgroundColor: '#fff',
-    padding: 24,
-    borderRadius: 10,
-    width: '80%',
-    alignItems: 'center',
-  },
-  modalTitle: {
-    fontWeight: 'bold',
-    fontSize: 20,
-    marginBottom: 10,
-  },
-  modalText: {
-    fontSize: 16,
-  },
-  modalMarket: {
-    marginTop: 8,
-    fontSize: 16,
-    fontStyle: 'italic',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  input: {
-    backgroundColor: '#eee',
-    width: '100%',
-    padding: 10,
-    marginBottom: 12,
-    borderRadius: 8,
-    fontSize: 16,
-    textAlign: 'center',
-  },
-  modalButton: {
-    backgroundColor: '#FFD700',
-    padding: 12,
-    borderRadius: 10,
-    width: '100%',
-    alignItems: 'center',
-  },
-});
+  root: { flex: 1, backgroundColor: BG },
+  appbar: { paddingHorizontal: 16, paddingBottom: 8, alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
+  logo: { fontSize: 28, fontWeight: "bold" },
+  loginBtn: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: GOLD, backgroundColor: "transparent" },
+  loginText: { color: GOLD, fontWeight: "700", fontSize: 14 },
 
-export default HomeScreen;
+  search: {
+    backgroundColor: CARD_BG, marginHorizontal: 16, borderRadius: 10, color: "#fff",
+    paddingVertical: 10, paddingHorizontal: 12, marginBottom: 8
+  },
+  chipsWrap: { backgroundColor: BG, paddingVertical: 8 },
+  chip: { backgroundColor: CARD_BG, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20 },
+  chipSelected: { backgroundColor: PURPLE },
+  chipText: { color: "#aaa", fontSize: 14 },
+  chipTextSelected: { color: "#fff", fontWeight: "600" },
+
+  card: { backgroundColor: CARD_BG, marginHorizontal: 16, marginBottom: 12, padding: 14, borderRadius: 12 },
+  title: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  sparkline: { height: 28, marginTop: 8, marginBottom: 8, borderRadius: 6, backgroundColor: "#2a2a2d" },
+
+  percentRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" },
+  yesPct: { color: GOLD, fontSize: 20, fontWeight: "700" },
+  noPct: { color: "#bfa3ff", fontSize: 20, fontWeight: "700" },
+
+  btnRow: { flexDirection: "row", gap: 10, marginTop: 10 },
+  buyYes: { flex: 1, backgroundColor: GOLD, borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  buyNo: { flex: 1, backgroundColor: PURPLE, borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  btnText: { color: "#fff", fontWeight: "700" },
+  btnTextDark: { color: "#000", fontWeight: "700" },
+
+  micro: { color: "#ccc", fontSize: 11, marginTop: 10 },
+  footer: { color: "#888", textAlign: "center", paddingVertical: 12 },
+  empty: { color: "#888", textAlign: "center", marginTop: 24 },
+
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center", padding: 16 },
+  modalCard: { width: "100%", backgroundColor: BG, borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "#222" },
+  modalTitle: { color: "#fff", fontSize: 18, fontWeight: "700" },
+  modalSubtitle: { color: "#aaa", fontSize: 12, marginTop: 6 },
+  modalInput: { backgroundColor: CARD_BG, color: "#fff", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, marginTop: 12 },
+  modalBtn: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+});
