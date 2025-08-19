@@ -1,47 +1,62 @@
-name: Deploy
+name: Deploy Backend (rsync + systemd)
 
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+env:
+  # Repo → Settings → Secrets and variables → Actions → Variables
+  SSH_HOST: ${{ vars.SSH_HOST }}          # e.g. 64.23.198.220
+  SSH_PORT: ${{ vars.SSH_PORT }}          # e.g. 22
+  SSH_USER: ${{ vars.SSH_USER }}          # e.g. deploy
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}  # e.g. predictpix
+  RSYNC_SRC: ${{ vars.RSYNC_SRC }}        # e.g. backend
+  RSYNC_DEST: ${{ vars.RSYNC_DEST }}      # e.g. /opt/predictpix/app
+  HEALTH_URL: ${{ vars.HEALTH_URL }}      # e.g. https://predictpix.com/api/health
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
-    # Repo “Variables” (Settings → Secrets and variables → Actions → Variables)
-    env:
-      SSH_HOST: ${{ vars.SSH_HOST }}          # e.g. 64.23.198.220
-      SSH_PORT: ${{ vars.SSH_PORT }}          # e.g. 22
-      SSH_USER: ${{ vars.SSH_USER }}          # e.g. deploy
-      SERVICE_NAME: ${{ vars.SERVICE_NAME }}  # e.g. predictpix
-      RSYNC_SRC: ${{ vars.RSYNC_SRC }}        # e.g. backend/
-      RSYNC_DEST: ${{ vars.RSYNC_DEST }}      # e.g. /opt/predictpix/app
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add SSH key
-        uses: webfactory/ssh-agent@v0.8.0
+      - name: Start ssh-agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Trust host key
+      - name: Trust server host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${SSH_PORT:-22}" -T 15 -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          ssh-keyscan -T 15 -H -p "${SSH_PORT:-22}" "${SSH_HOST}" >> ~/.ssh/known_hosts
 
-      - name: Rsync app to server
+      - name: Ensure destination directory exists
+        run: |
+          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" "mkdir -p '${RSYNC_DEST}'"
+
+      - name: Rsync backend to server
         run: |
           rsync -az --delete \
-            --omit-dir-times --no-perms --no-owner --no-group \
-            -e "ssh -p ${SSH_PORT:-22}" \
-            "${RSYNC_SRC:-backend/}" "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST:-/opt/predictpix/app}"
+            --no-perms --no-owner --no-group --no-times \
+            --exclude='.git/' --exclude='.github/' --exclude='__pycache__/' \
+            "${RSYNC_SRC}/" "${SSH_USER}@${SSH_HOST}:${RSYNC_DEST}/"
+
+      - name: Mark deploy time
+        run: |
+          ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
+            "date -u +%FT%TZ > '${RSYNC_DEST}/.deployed-at'"
 
       - name: Restart service
         run: |
           ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
-            'sudo -n /usr/bin/systemctl restart '"${SERVICE_NAME}"' && sudo -n /usr/bin/systemctl is-active '"${SERVICE_NAME}"''
+            "sudo -n /usr/bin/systemctl restart '${SERVICE_NAME}' && sudo -n /usr/bin/systemctl is-active '${SERVICE_NAME}'"
 
-      - name: Health check
-        run: curl -fsS https://predictpix.com/api/health
+      - name: Health check (public)
+        run: |
+          curl -fsS "${HEALTH_URL:-https://predictpix.com/api/health}" | head -c 200
+
