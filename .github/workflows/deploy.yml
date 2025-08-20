@@ -58,7 +58,7 @@ jobs:
           ssh -p "${SSH_PORT:-22}" "${SSH_USER}@${SSH_HOST}" \
             "sudo /usr/bin/systemctl restart '${SERVICE_NAME}' && sudo /usr/bin/systemctl is-active '${SERVICE_NAME}'"
 
-      - name: Health check (public, retry with pipefail)
+      - name: Health check (public, retry)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -87,45 +87,27 @@ jobs:
         run: |
           set -Eeuo pipefail
           base="${HEALTH_URL%/api/health}"
-          login_url="${base}/api/auth/login"
-          markets_url="${base}/api/markets?limit=1"
-          echo "login_url=${login_url}"     >> "$GITHUB_OUTPUT"
-          echo "markets_url=${markets_url}" >> "$GITHUB_OUTPUT"
-          echo "Using base: ${base}"
-          echo "Login URL: ${login_url}"
-          echo "Markets URL: ${markets_url}"
+          [ -z "$base" ] && base="https://predictpix.com"
+          echo "login_url=${base}/api/auth/login"     >> "$GITHUB_OUTPUT"
+          echo "markets_url=${base}/api/markets?limit=1" >> "$GITHUB_OUTPUT"
+          echo "Base: $base"
 
-      # ---- New: debug the key without printing it ----
-      - name: Debug: show key length & hash (redacted)
-        shell: bash
-        env:
-          RAW_KEY_SECRET: ${{ secrets.CI_API_KEY }}
-          RAW_KEY_VAR: ${{ vars.CI_API_KEY }}
-        run: |
-          set -Eeuo pipefail
-          raw="${RAW_KEY_SECRET:-}"
-          if [ -z "$raw" ]; then raw="${RAW_KEY_VAR:-}"; fi
-          if [ -z "$raw" ]; then
-            echo "CI_API_KEY not set (neither repository secret nor variable)."; exit 1
-          fi
-          key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-          echo -n "$key" | wc -c | awk '{print "Key length:", $1}'
-          echo -n "$key" | sha256sum | awk '{print "Key sha256:", $1}'
-
-      # ---- New: robust login (JSON → header → form) with fallback for secret/var ----
-      - name: Login (API key mode)
+      - name: Login (API key mode; robust)
         id: login
         shell: bash
-        env:
-          LOGIN_URL: ${{ steps.endpoints.outputs.login_url }}
-          RAW_KEY_SECRET: ${{ secrets.CI_API_KEY }}
-          RAW_KEY_VAR: ${{ vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
-          raw="${RAW_KEY_SECRET:-}"
-          if [ -z "$raw" ]; then raw="${RAW_KEY_VAR:-}"; fi
-          if [ -z "$raw" ]; then echo "CI_API_KEY not set"; exit 1; fi
+          LOGIN_URL="${{ steps.endpoints.outputs.login_url }}"
+          # Prefer secret; fallback to repo variable — no YAML expressions.
+          raw_secret='${{ secrets.CI_API_KEY }}'
+          raw_var='${{ vars.CI_API_KEY }}'
+          raw="$raw_secret"
+          if [ -z "$raw" ]; then raw="$raw_var"; fi
+          if [ -z "$raw" ]; then echo "CI_API_KEY not set (secret or variable)"; exit 1; fi
           key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+          echo -n "$key" | wc -c | awk '{print "Key length:", $1}'
+          echo -n "$key" | sha256sum | awk '{print "Key sha256:", $1}'
 
           attempt() {
             name="$1"; shift
@@ -140,14 +122,11 @@ jobs:
             fi
           }
 
-          # A) JSON body
           if attempt "JSON" -X POST "$LOGIN_URL" -H "Content-Type: application/json" \
                -d "{\"api_key\":\"${key}\"}"; then
             :
-          # B) X-API-Key header
           elif attempt "HEADER" -X POST "$LOGIN_URL" -H "X-API-Key: ${key}" -H "Content-Length: 0"; then
             :
-          # C) form-encoded
           elif attempt "FORM" -X POST "$LOGIN_URL" -H "Content-Type: application/x-www-form-urlencoded" \
                --data-urlencode "api_key=${key}"; then
             :
@@ -163,10 +142,9 @@ jobs:
 
       - name: Markets sanity (authorized)
         shell: bash
-        env:
-          MARKETS_URL: ${{ steps.endpoints.outputs.markets_url }}
-          TOKEN: ${{ steps.login.outputs.token }}
         run: |
           set -Eeuo pipefail
+          MARKETS_URL="${{ steps.endpoints.outputs.markets_url }}"
+          TOKEN="${{ steps.login.outputs.token }}"
           curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
 
