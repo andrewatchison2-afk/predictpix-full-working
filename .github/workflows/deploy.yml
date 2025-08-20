@@ -76,75 +76,27 @@ jobs:
           echo "Health check failed after retries."
           exit 1
 
-      - name: Install jq (for JSON parsing)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: Compute endpoints from HEALTH_URL
-        id: endpoints
+      - name: Login (header mode) and Markets sanity
+        id: sanity
         shell: bash
+        env:
+          RAW_SECRET: ${{ secrets.CI_API_KEY }}
+          RAW_VAR: ${{ vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
-          base="${HEALTH_URL%/api/health}"
-          [ -z "$base" ] && base="https://predictpix.com"
-          echo "login_url=${base}/api/auth/login"     >> "$GITHUB_OUTPUT"
-          echo "markets_url=${base}/api/markets?limit=1" >> "$GITHUB_OUTPUT"
-          echo "Base: $base"
-
-      - name: Login (API key mode; robust)
-        id: login
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          LOGIN_URL="${{ steps.endpoints.outputs.login_url }}"
-          # Prefer secret; fallback to repo variable — no YAML expressions.
-          raw_secret='${{ secrets.CI_API_KEY }}'
-          raw_var='${{ vars.CI_API_KEY }}'
-          raw="$raw_secret"
-          if [ -z "$raw" ]; then raw="$raw_var"; fi
-          if [ -z "$raw" ]; then echo "CI_API_KEY not set (secret or variable)"; exit 1; fi
+          raw="${RAW_SECRET:-}"; [ -z "$raw" ] && raw="${RAW_VAR:-}"
+          if [ -z "$raw" ]; then echo "CI_API_KEY not set (secret or var)"; exit 1; fi
           key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo "Key length: $(printf "%s" "$key" | wc -c)"
+          echo "Key sha256: $(printf "%s" "$key" | sha256sum | awk "{print \$1}")"
 
-          echo -n "$key" | wc -c | awk '{print "Key length:", $1}'
-          echo -n "$key" | sha256sum | awk '{print "Key sha256:", $1}'
+          # Header login (server expects X-API-Key)
+          token=$(curl -fsS -X POST "${HEALTH_URL%/api/health}/api/auth/login" \
+            -H "X-API-Key: ${key}" -H "Content-Length: 0" | \
+            sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+          if [ -z "$token" ]; then echo "No token returned from login"; exit 1; fi
 
-          attempt() {
-            name="$1"; shift
-            echo "Trying $name login…"
-            status=$(curl -sS -o login.json -w "%{http_code}" "$@")
-            echo "Login HTTP status ($name): $status"
-            if [ "$status" = "200" ]; then
-              return 0
-            else
-              echo "Response body ($name):"; cat login.json || true
-              return 1
-            fi
-          }
-
-          if attempt "JSON" -X POST "$LOGIN_URL" -H "Content-Type: application/json" \
-               -d "{\"api_key\":\"${key}\"}"; then
-            :
-          elif attempt "HEADER" -X POST "$LOGIN_URL" -H "X-API-Key: ${key}" -H "Content-Length: 0"; then
-            :
-          elif attempt "FORM" -X POST "$LOGIN_URL" -H "Content-Type: application/x-www-form-urlencoded" \
-               --data-urlencode "api_key=${key}"; then
-            :
-          else
-            echo "All login attempts failed"; exit 1
-          fi
-
-          token=$(jq -r '.access_token // .token // .jwt // empty' login.json)
-          if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "No token in successful login response"; cat login.json; exit 1
-          fi
-          echo "token=$token" >> "$GITHUB_OUTPUT"
-
-      - name: Markets sanity (authorized)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          MARKETS_URL="${{ steps.endpoints.outputs.markets_url }}"
-          TOKEN="${{ steps.login.outputs.token }}"
-          curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
+          # Authorized markets probe
+          curl -fsS "${HEALTH_URL%/api/health}/api/markets?limit=1" \
+            -H "Authorization: Bearer ${token}" | head -c 200
 
