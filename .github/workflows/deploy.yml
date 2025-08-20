@@ -76,4 +76,58 @@ jobs:
           echo "Health check failed after retries."
           exit 1
 
+      # ---- NEW: tooling for JSON parsing ----
+      - name: Install jq (for JSON parsing)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
 
+      # ---- NEW: derive login/markets endpoints from HEALTH_URL ----
+      - name: Compute endpoints from HEALTH_URL
+        id: endpoints
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="${HEALTH_URL%/api/health}"
+          login_url="${base}/api/auth/login"
+          markets_url="${base}/api/markets?limit=1"
+          echo "login_url=${login_url}"   >> "$GITHUB_OUTPUT"
+          echo "markets_url=${markets_url}" >> "$GITHUB_OUTPUT"
+          echo "Using base: ${base}"
+          echo "Login URL: ${login_url}"
+          echo "Markets URL: ${markets_url}"
+
+      # ---- NEW: sanity login using CI_API_KEY secret ----
+      - name: Login (API key mode)
+        id: login
+        shell: bash
+        env:
+          LOGIN_URL: ${{ steps.endpoints.outputs.login_url }}
+          CI_API_KEY: ${{ secrets.CI_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "${CI_API_KEY:-}" ]; then
+            echo "Missing secrets.CI_API_KEY"
+            exit 1
+          fi
+          status=$(curl -sS -o login.json -w "%{http_code}" -X POST "$LOGIN_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"api_key\":\"${CI_API_KEY}\"}")
+          echo "Login HTTP status: $status"
+          test "$status" = "200"
+          cat login.json
+          token=$(jq -r '.access_token' login.json)
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "No access_token in login response"; exit 1
+          fi
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      # ---- NEW: authorized markets probe ----
+      - name: Markets sanity (authorized)
+        shell: bash
+        env:
+          MARKETS_URL: ${{ steps.endpoints.outputs.markets_url }}
+          TOKEN: ${{ steps.login.outputs.token }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
