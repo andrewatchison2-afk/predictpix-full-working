@@ -161,3 +161,4 @@ jobs:
           set -Eeuo pipefail
           curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
 
+
