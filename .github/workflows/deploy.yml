@@ -13,7 +13,7 @@ env:
   SSH_PORT: ${{ vars.SSH_PORT }}
   SSH_USER: ${{ vars.SSH_USER }}
   SERVICE_NAME: ${{ vars.SERVICE_NAME }}
-  RSYNC_SRC: ${{ vars.RSINC_SRC || vars.RSYNC_SRC }}  # keep your variable
+  RSYNC_SRC: ${{ vars.RSYNC_SRC }}
   RSYNC_DEST: ${{ vars.RSYNC_DEST }}
   HEALTH_URL: ${{ vars.HEALTH_URL }} # e.g. https://predictpix.com/api/health
 
@@ -89,34 +89,43 @@ jobs:
           base="${HEALTH_URL%/api/health}"
           login_url="${base}/api/auth/login"
           markets_url="${base}/api/markets?limit=1"
-          echo "login_url=${login_url}"   >> "$GITHUB_OUTPUT"
+          echo "login_url=${login_url}"     >> "$GITHUB_OUTPUT"
           echo "markets_url=${markets_url}" >> "$GITHUB_OUTPUT"
           echo "Using base: ${base}"
           echo "Login URL: ${login_url}"
           echo "Markets URL: ${markets_url}"
 
+      # ---- New: debug the key without printing it ----
       - name: Debug: show key length & hash (redacted)
         shell: bash
         env:
-          RAW_KEY: ${{ secrets.CI_API_KEY || vars.CI_API_KEY }}
+          RAW_KEY_SECRET: ${{ secrets.CI_API_KEY }}
+          RAW_KEY_VAR: ${{ vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
-          if [ -z "${RAW_KEY:-}" ]; then
-            echo "CI_API_KEY not set (neither secrets.CI_API_KEY nor vars.CI_API_KEY)"; exit 1
+          raw="${RAW_KEY_SECRET:-}"
+          if [ -z "$raw" ]; then raw="${RAW_KEY_VAR:-}"; fi
+          if [ -z "$raw" ]; then
+            echo "CI_API_KEY not set (neither repository secret nor variable)."; exit 1
           fi
-          key=$(printf "%s" "$RAW_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           echo -n "$key" | wc -c | awk '{print "Key length:", $1}'
           echo -n "$key" | sha256sum | awk '{print "Key sha256:", $1}'
 
-      - name: Login (robust: JSON → header → form)
+      # ---- New: robust login (JSON → header → form) with fallback for secret/var ----
+      - name: Login (API key mode)
         id: login
         shell: bash
         env:
           LOGIN_URL: ${{ steps.endpoints.outputs.login_url }}
-          RAW_KEY: ${{ secrets.CI_API_KEY || vars.CI_API_KEY }}
+          RAW_KEY_SECRET: ${{ secrets.CI_API_KEY }}
+          RAW_KEY_VAR: ${{ vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
-          key=$(printf "%s" "$RAW_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          raw="${RAW_KEY_SECRET:-}"
+          if [ -z "$raw" ]; then raw="${RAW_KEY_VAR:-}"; fi
+          if [ -z "$raw" ]; then echo "CI_API_KEY not set"; exit 1; fi
+          key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
           attempt() {
             name="$1"; shift
@@ -160,5 +169,4 @@ jobs:
         run: |
           set -Eeuo pipefail
           curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
-
 
