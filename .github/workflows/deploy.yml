@@ -13,7 +13,7 @@ env:
   SSH_PORT: ${{ vars.SSH_PORT }}
   SSH_USER: ${{ vars.SSH_USER }}
   SERVICE_NAME: ${{ vars.SERVICE_NAME }}
-  RSYNC_SRC: ${{ vars.RSYNC_SRC }}
+  RSYNC_SRC: ${{ vars.RSINC_SRC || vars.RSYNC_SRC }}  # keep your variable
   RSYNC_DEST: ${{ vars.RSYNC_DEST }}
   HEALTH_URL: ${{ vars.HEALTH_URL }} # e.g. https://predictpix.com/api/health
 
@@ -76,13 +76,11 @@ jobs:
           echo "Health check failed after retries."
           exit 1
 
-      # ---- NEW: tooling for JSON parsing ----
       - name: Install jq (for JSON parsing)
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      # ---- NEW: derive login/markets endpoints from HEALTH_URL ----
       - name: Compute endpoints from HEALTH_URL
         id: endpoints
         shell: bash
@@ -97,32 +95,63 @@ jobs:
           echo "Login URL: ${login_url}"
           echo "Markets URL: ${markets_url}"
 
-      # ---- NEW: sanity login using CI_API_KEY secret ----
-      - name: Login (API key mode)
+      - name: Debug: show key length & hash (redacted)
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.CI_API_KEY || vars.CI_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "${RAW_KEY:-}" ]; then
+            echo "CI_API_KEY not set (neither secrets.CI_API_KEY nor vars.CI_API_KEY)"; exit 1
+          fi
+          key=$(printf "%s" "$RAW_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          echo -n "$key" | wc -c | awk '{print "Key length:", $1}'
+          echo -n "$key" | sha256sum | awk '{print "Key sha256:", $1}'
+
+      - name: Login (robust: JSON → header → form)
         id: login
         shell: bash
         env:
           LOGIN_URL: ${{ steps.endpoints.outputs.login_url }}
-          CI_API_KEY: ${{ secrets.CI_API_KEY }}
+          RAW_KEY: ${{ secrets.CI_API_KEY || vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
-          if [ -z "${CI_API_KEY:-}" ]; then
-            echo "Missing secrets.CI_API_KEY"
-            exit 1
+          key=$(printf "%s" "$RAW_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+          attempt() {
+            name="$1"; shift
+            echo "Trying $name login…"
+            status=$(curl -sS -o login.json -w "%{http_code}" "$@")
+            echo "Login HTTP status ($name): $status"
+            if [ "$status" = "200" ]; then
+              return 0
+            else
+              echo "Response body ($name):"; cat login.json || true
+              return 1
+            fi
+          }
+
+          # A) JSON body
+          if attempt "JSON" -X POST "$LOGIN_URL" -H "Content-Type: application/json" \
+               -d "{\"api_key\":\"${key}\"}"; then
+            :
+          # B) X-API-Key header
+          elif attempt "HEADER" -X POST "$LOGIN_URL" -H "X-API-Key: ${key}" -H "Content-Length: 0"; then
+            :
+          # C) form-encoded
+          elif attempt "FORM" -X POST "$LOGIN_URL" -H "Content-Type: application/x-www-form-urlencoded" \
+               --data-urlencode "api_key=${key}"; then
+            :
+          else
+            echo "All login attempts failed"; exit 1
           fi
-          status=$(curl -sS -o login.json -w "%{http_code}" -X POST "$LOGIN_URL" \
-            -H "Content-Type: application/json" \
-            -d "{\"api_key\":\"${CI_API_KEY}\"}")
-          echo "Login HTTP status: $status"
-          test "$status" = "200"
-          cat login.json
-          token=$(jq -r '.access_token' login.json)
+
+          token=$(jq -r '.access_token // .token // .jwt // empty' login.json)
           if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "No access_token in login response"; exit 1
+            echo "No token in successful login response"; cat login.json; exit 1
           fi
           echo "token=$token" >> "$GITHUB_OUTPUT"
 
-      # ---- NEW: authorized markets probe ----
       - name: Markets sanity (authorized)
         shell: bash
         env:
@@ -131,3 +160,4 @@ jobs:
         run: |
           set -Eeuo pipefail
           curl -fsS "${MARKETS_URL}" -H "Authorization: Bearer ${TOKEN}" | head -c 200
+
