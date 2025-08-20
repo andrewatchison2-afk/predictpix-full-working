@@ -84,19 +84,54 @@ jobs:
           RAW_VAR: ${{ vars.CI_API_KEY }}
         run: |
           set -Eeuo pipefail
+          base="${HEALTH_URL%/api/health}"
           raw="${RAW_SECRET:-}"; [ -z "$raw" ] && raw="${RAW_VAR:-}"
           if [ -z "$raw" ]; then echo "CI_API_KEY not set (secret or var)"; exit 1; fi
           key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           echo "Key length: $(printf "%s" "$key" | wc -c)"
-          echo "Key sha256: $(printf "%s" "$key" | sha256sum | awk "{print \$1}")"
+          echo "Key sha256: $(printf "%s" "$key" | sha256sum | awk '{print $1}')"
 
           # Header login (server expects X-API-Key)
-          token=$(curl -fsS -X POST "${HEALTH_URL%/api/health}/api/auth/login" \
+          token=$(curl -fsS -X POST "${base}/api/auth/login" \
             -H "X-API-Key: ${key}" -H "Content-Length: 0" | \
             sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-          if [ -z "$token" ]; then echo "No token returned from login"; exit 1; fi
+          if [ -z "$token" ]; then echo "No token returned from header login"; exit 1; fi
+          echo "token_len=$(printf "%s" "$token" | wc -c)"
 
           # Authorized markets probe
-          curl -fsS "${HEALTH_URL%/api/health}/api/markets?limit=1" \
+          curl -fsS "${base}/api/markets?limit=1" \
             -H "Authorization: Bearer ${token}" | head -c 200
+
+      - name: Auth mode guard (reject JSON & FORM)
+        shell: bash
+        env:
+          RAW_SECRET: ${{ secrets.CI_API_KEY }}
+          RAW_VAR: ${{ vars.CI_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+          base="${HEALTH_URL%/api/health}"
+          raw="${RAW_SECRET:-}"; [ -z "$raw" ] && raw="${RAW_VAR:-}"
+          key=$(printf "%s" "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+          # JSON body should NOT be accepted
+          json_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/api/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"api_key\":\"${key}\"}" || true)
+          echo "JSON login HTTP: ${json_code}"
+          if [ "${json_code}" = "200" ]; then
+            echo "FAIL: JSON body login returned 200. Only X-API-Key header must succeed."
+            exit 1
+          fi
+
+          # FORM body should NOT be accepted
+          form_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${base}/api/auth/login" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "api_key=${key}" || true)
+          echo "FORM login HTTP: ${form_code}"
+          if [ "${form_code}" = "200" ]; then
+            echo "FAIL: FORM login returned 200. Only X-API-Key header must succeed."
+            exit 1
+          fi
+
+          echo "Auth mode guard passed (JSON=${json_code}, FORM=${form_code})"
 
